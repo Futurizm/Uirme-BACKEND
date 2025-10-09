@@ -401,6 +401,8 @@ app.put(
         req.user.role === "school_admin"
           ? { _id: req.params.id, school_id: req.user.school_id }
           : { _id: req.params.id };
+
+      // Validate school_id if provided
       if (req.body.school_id && !mongoose.isValidObjectId(req.body.school_id)) {
         return res.status(400).json({ error: "Invalid school_id" });
       }
@@ -408,9 +410,43 @@ app.put(
         const school = await School.findById(req.body.school_id);
         if (!school) return res.status(400).json({ error: "School not found" });
       }
-      const student = await Student.findOneAndUpdate(query, req.body, { new: true });
+
+      // Extract password and other student updates
+      const { password, email, ...studentUpdates } = req.body;
+
+      // Find the student
+      const student = await Student.findOne(query);
       if (!student) return res.status(404).json({ error: "Student not found" });
-      res.json(student);
+
+      // If email is provided, check for uniqueness in User collection
+      if (email) {
+        const existingUser = await User.findOne({ email });
+        if (existingUser && existingUser._id.toString() !== student.user_id.toString()) {
+          return res.status(400).json({ error: "Email already exists" });
+        }
+      }
+
+      console.log("Received req.body:", req.body);
+      if (password) {
+        console.log("Updating password for user_id:", student.user_id);
+      }
+
+      // Update associated user if email or password is provided
+      if (email || password) {
+        const userUpdates = {};
+        if (email) userUpdates.email = email;
+        if (password) {
+          const salt = await bcrypt.genSalt(10);
+          userUpdates.password = await bcrypt.hash(password, salt);
+        }
+        await User.findByIdAndUpdate(student.user_id, userUpdates);
+      }
+
+      // Update student data
+      const updatedStudent = await Student.findOneAndUpdate(query, studentUpdates, { new: true });
+      if (!updatedStudent) return res.status(404).json({ error: "Student not found" });
+
+      res.json(updatedStudent);
     } catch (err) {
       console.error("Error updating student:", err.message, err.stack);
       res.status(500).json({ error: "Error updating student", details: err.message });
