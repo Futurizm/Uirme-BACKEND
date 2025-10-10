@@ -597,8 +597,8 @@ app.put(
       const event = await Event.findOne(query);
       if (!event) return res.status(404).json({ error: "Event not found" });
       if (is_active === false) {
-        const records = await AttendanceRecord.find({ event_name: event.name });
-        console.log(`Found ${records.length} attendance records for event "${event.name}"`);
+        const records = await AttendanceRecord.find({ event_name: event.name, school_id: event.school_id });
+        console.log(`Found ${records.length} attendance records for event "${event.name}" in school ${event.school_id}`);
         if (records.length > 0) {
           const archived_at = new Date();
           const historicalData = records.map(record => ({
@@ -617,6 +617,7 @@ app.put(
           } catch (archiveErr) {
             console.error(`Error copying records to HistoricalAttendanceRecord for event "${event.name}":`, archiveErr.message, archiveErr.stack);
           }
+          await AttendanceRecord.deleteMany({ event_name: event.name, school_id: event.school_id });
         } else {
           console.log(`No records to copy for event "${event.name}"`);
         }
@@ -645,8 +646,8 @@ app.delete(
           : { _id: req.params.id };
       const event = await Event.findOneAndDelete(query);
       if (!event) return res.status(404).json({ error: "Event not found" });
-      await AttendanceRecord.deleteMany({ event_name: event.name });
-      console.log(`Event deleted: ${event.name}, attendance records cleared`);
+      await AttendanceRecord.deleteMany({ event_name: event.name, school_id: event.school_id });
+      console.log(`Event deleted: ${event.name}, attendance records cleared for school ${event.school_id}`);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting event:", err.message, err.stack);
@@ -719,14 +720,25 @@ app.get(
     try {
       const eventName = req.params.eventName.trim();
       console.log("Fetching attendance for eventName:", eventName);
-      const event = await Event.findOne({ name: eventName }).collation({ locale: "ru", strength: 2 });
+      let eventQuery = { name: eventName };
+      if (req.user.role !== "main_admin") {
+        eventQuery = { ...eventQuery, school_id: req.user.school_id };
+      }
+      const event = await Event.findOne(eventQuery).collation({ locale: "ru", strength: 2 });
       if (!event) return res.status(404).json({ error: "Event not found" });
 
-      const records = await AttendanceRecord.find({ event_name: eventName })
+      // Access checks
+      if (req.user.role === "school_admin" && event.school_id.toString() !== req.user.school_id) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      if (req.user.role === "teacher" && event.teacher_id.toString() !== req.user.userId) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const records = await AttendanceRecord.find({ event_name: eventName, school_id: event.school_id })
         .collation({ locale: "ru", strength: 2 })
         .populate("student_id", "name")
         .sort({ timestamp: -1 });
-
 
       records.forEach((record, index) => {
         if (!record.student_id) {
@@ -753,13 +765,6 @@ app.get(
     }
   }
 );
-
-// if (
-      //   req.user.role === "school_admin" &&
-      //   event.school_id.toString() !== req.user.school_id
-      // ) {
-      //   return res.status(403).json({ error: "Access denied" });
-      // }
 
 app.get(
   "/attendance/student/:studentId",
@@ -816,15 +821,19 @@ app.get(
       if (!studentId || !eventName) {
         return res.status(400).json({ error: "Student ID and event name required" });
       }
-      const event = await Event.findOne({ name: eventName });
+      let eventQuery = { name: eventName };
+      if (req.user.role !== "main_admin") {
+        eventQuery = { ...eventQuery, school_id: req.user.school_id };
+      }
+      const event = await Event.findOne(eventQuery);
       if (!event) return res.status(404).json({ error: "Event not found" });
       if (
         req.user.role === "school_admin" &&
         event.school_id.toString() !== req.user.school_id
       ) {
         return res.status(403).json({ error: "Access denied" });
-      }``
-      const record = await AttendanceRecord.findOne({ student_id: studentId, event_name: eventName });
+      }
+      const record = await AttendanceRecord.findOne({ student_id: studentId, event_name: eventName, school_id: event.school_id });
       res.json(!!record);
     } catch (err) {
       console.error("Error checking attendance:", err.message, err.stack);
@@ -843,7 +852,11 @@ app.post(
       const trimmedEventName = event_name.trim();
       console.log("Received attendance data:", { student_id, event_name: trimmedEventName, timestamp, scanned_by });
 
-      const event = await Event.findOne({ name: trimmedEventName });
+      let eventQuery = { name: trimmedEventName };
+      if (req.user.role !== "main_admin") {
+        eventQuery = { ...eventQuery, school_id: req.user.school_id };
+      }
+      const event = await Event.findOne(eventQuery);
       if (!event) {
         console.error(`Event "${trimmedEventName}" not found`);
         return res.status(404).json({ error: "Event not found" });
@@ -851,6 +864,10 @@ app.post(
 
       if (req.user.role === "school_admin" && event.school_id.toString() !== req.user.school_id) {
         console.error(`Access denied: school_id mismatch (event: ${event.school_id}, user: ${req.user.school_id})`);
+        return res.status(403).json({ error: "Access denied" });
+      }
+      if (req.user.role === "teacher" && event.teacher_id.toString() !== req.user.userId) {
+        console.error(`Access denied: teacher_id mismatch (event: ${event.teacher_id}, user: ${req.user.userId})`);
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -868,9 +885,10 @@ app.post(
       const existingRecord = await AttendanceRecord.findOne({
         student_id,
         event_name: trimmedEventName,
+        school_id: event.school_id,
       });
       if (existingRecord) {
-        console.error(`Attendance already recorded for student "${student_id}" and event "${trimmedEventName}"`);
+        console.error(`Attendance already recorded for student "${student_id}" and event "${trimmedEventName}" in school "${event.school_id}"`);
         return res.status(400).json({ error: "Attendance already recorded" });
       }
 
@@ -945,7 +963,11 @@ app.delete(
   async (req, res) => {
     try {
       const eventName = req.params.eventName;
-      const event = await Event.findOne({ name: eventName });
+      let eventQuery = { name: eventName };
+      if (req.user.role !== "main_admin") {
+        eventQuery = { ...eventQuery, school_id: req.user.school_id };
+      }
+      const event = await Event.findOne(eventQuery);
       if (!event) return res.status(404).json({ error: "Event not found" });
       if (
         req.user.role === "school_admin" &&
@@ -953,8 +975,11 @@ app.delete(
       ) {
         return res.status(403).json({ error: "Access denied" });
       }
-      await AttendanceRecord.deleteMany({ event_name: eventName });
-      console.log(`All attendance records for event ${eventName} deleted`);
+      if (req.user.role === "teacher" && event.teacher_id.toString() !== req.user.userId) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      await AttendanceRecord.deleteMany({ event_name: eventName, school_id: event.school_id });
+      console.log(`All attendance records for event ${eventName} deleted in school ${event.school_id}`);
       res.json({ success: true });
     } catch (err) {
       console.error("Error deleting all attendance by event:", err.message, err.stack);
