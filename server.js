@@ -530,8 +530,9 @@ app.post(
       if (!teacher_id) return res.status(400).json({ error: "Teacher ID required" });
       const teacher = await User.findOne({ _id: teacher_id, role: "teacher", school_id });
       if (!teacher) return res.status(400).json({ error: "Invalid teacher: not found or doesn't belong to the school" });
+      const trimmedName = name.trim(); // Trim the name to remove leading/trailing spaces
       const event = new Event({
-        name,
+        name: trimmedName,
         schedule,
         description,
         is_active: is_active || false,
@@ -560,7 +561,8 @@ app.put(
           ? { _id: req.params.id, school_id: req.user.school_id }
           : { _id: req.params.id };
       const { name, schedule, description, is_active, teacher_id } = req.body;
-      let updates = { name, schedule, description, is_active, updated_at: new Date() };
+      const trimmedName = name.trim(); // Trim the name to remove leading/trailing spaces
+      let updates = { name: trimmedName, schedule, description, is_active, updated_at: new Date() };
       if (teacher_id) {
         const event = await Event.findOne(query);
         if (!event) return res.status(404).json({ error: "Event not found" });
@@ -715,38 +717,49 @@ app.get(
   roleMiddleware(["school_admin", "main_admin", "teacher"]),
   async (req, res) => {
     try {
-      const eventName = req.params.eventName;
-      const event = await Event.findOne({ name: eventName });
+      const eventName = req.params.eventName.trim();
+      console.log("Fetching attendance for eventName:", eventName);
+      const event = await Event.findOne({ name: eventName }).collation({ locale: "ru", strength: 2 });
       if (!event) return res.status(404).json({ error: "Event not found" });
-      // if (
-      //   req.user.role === "school_admin" &&
-      //   event.school_id.toString() !== req.user.school_id
-      // ) {
-      //   return res.status(403).json({ error: "Access denied" });
-      // }
+
       const records = await AttendanceRecord.find({ event_name: eventName })
+        .collation({ locale: "ru", strength: 2 })
         .populate("student_id", "name")
         .sort({ timestamp: -1 });
 
-      res.json(
-        records.map((record) => {
-          console.log("Attendance record:", record);
-          return {
-            _id: record._id,
-            student_id: record.student_id._id,
-            studentName: record.student_id.name,
-            event_name: record.event_name,
-            timestamp: record.timestamp,
-            scanned_by: record.scanned_by,
-          };
-        })
-      );
+
+      records.forEach((record, index) => {
+        if (!record.student_id) {
+          console.warn(`Record ${index} has null student_id:`, record);
+        }
+      });
+
+      // Filter out records with null student_id and map valid ones
+      const filteredRecords = records
+        .filter((record) => record.student_id != null) // Ensure student_id exists
+        .map((record) => ({
+          _id: record._id,
+          student_id: record.student_id._id,
+          studentName: record.student_id.name || "Unknown Student",
+          event_name: record.event_name,
+          timestamp: record.timestamp,
+          scanned_by: record.scanned_by,
+        }));
+
+      res.json(filteredRecords);
     } catch (err) {
       console.error("Error fetching attendance by event:", err.message, err.stack);
       res.status(500).json({ error: "Error fetching attendance by event", details: err.message });
     }
   }
 );
+
+// if (
+      //   req.user.role === "school_admin" &&
+      //   event.school_id.toString() !== req.user.school_id
+      // ) {
+      //   return res.status(403).json({ error: "Access denied" });
+      // }
 
 app.get(
   "/attendance/student/:studentId",
@@ -827,44 +840,43 @@ app.post(
   async (req, res) => {
     try {
       const { student_id, event_name, timestamp, scanned_by } = req.body;
-      console.log("Received attendance data:", { student_id, event_name, timestamp, scanned_by });
-      const event = await Event.findOne({ name: event_name });
+      const trimmedEventName = event_name.trim();
+      console.log("Received attendance data:", { student_id, event_name: trimmedEventName, timestamp, scanned_by });
+
+      const event = await Event.findOne({ name: trimmedEventName });
       if (!event) {
-        console.error(`Event "${event_name}" not found`);
+        console.error(`Event "${trimmedEventName}" not found`);
         return res.status(404).json({ error: "Event not found" });
       }
-      console.log("Found event:", event);
-      if (
-        req.user.role === "school_admin" &&
-        event.school_id.toString() !== req.user.school_id
-      ) {
+
+      if (req.user.role === "school_admin" && event.school_id.toString() !== req.user.school_id) {
         console.error(`Access denied: school_id mismatch (event: ${event.school_id}, user: ${req.user.school_id})`);
         return res.status(403).json({ error: "Access denied" });
       }
+
       const student = await Student.findById(student_id);
       if (!student) {
         console.error(`Student "${student_id}" not found`);
         return res.status(404).json({ error: "Student not found" });
       }
-      console.log("Found student:", student);
-      if (
-        req.user.role === "school_admin" &&
-        student.school_id.toString() !== req.user.school_id
-      ) {
+
+      if (req.user.role === "school_admin" && student.school_id.toString() !== req.user.school_id) {
         console.error(`Access denied: student school_id mismatch (student: ${student.school_id}, user: ${req.user.school_id})`);
         return res.status(403).json({ error: "Access denied" });
       }
+
       const existingRecord = await AttendanceRecord.findOne({
         student_id,
-        event_name,
+        event_name: trimmedEventName,
       });
       if (existingRecord) {
-        console.error(`Attendance already recorded for student "${student_id}" and event "${event_name}"`);
+        console.error(`Attendance already recorded for student "${student_id}" and event "${trimmedEventName}"`);
         return res.status(400).json({ error: "Attendance already recorded" });
       }
+
       const record = new AttendanceRecord({
         student_id,
-        event_name,
+        event_name: trimmedEventName,
         timestamp: new Date(timestamp),
         scanned_by,
         school_id: event.school_id,
@@ -876,7 +888,7 @@ app.post(
       // Save to HistoricalAttendanceRecord
       const historicalRecord = new HistoricalAttendanceRecord({
         student_id,
-        event_name,
+        event_name: trimmedEventName,
         timestamp: new Date(timestamp),
         scanned_by,
         school_id: event.school_id,
